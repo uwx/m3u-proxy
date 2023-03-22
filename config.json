@@ -8,7 +8,7 @@
       "m3u": "http://url-of-my-stream-provider/streams.m3u",
       "models": [
         {
-          "name": "",
+          "name": "Default",
           "filters": [
             {
               "field": "group-title",

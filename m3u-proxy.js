@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
-const path = require('path');
+//@ts-check
 
-const get = require('simple-get');
+const fs = require('fsxt');
+const path = require('path');
+const { Readable, Writable } = require('stream');
+
 const byline = require('byline');
 const flow = require('xml-flow');
 
@@ -20,48 +22,46 @@ const args = cmdLineArgs(definitions);
 
 const config = require(args.config);
 
+/**
+ * @param {string} url 
+ * @param {string} filename 
+ * @returns 
+ */
+async function getFile(url, filename) {
+  debug(`> getFile: ${filename}`);
 
-const getFile = (url, filename) => {
-  debug(` ┌getFile: ${filename}`);
-  return new Promise(resolve => {
-    // Prepare destination
-    const dirname = path.dirname(filename);
-    if (!fs.existsSync(dirname)) fs.mkdirSync(dirname, { recursive: true });
-    const file = fs.createWriteStream(filename + '.tmp');
-    // and download
-    get({ url: url, rejectUnauthorized: false }, (error, response) => {
-      if (error) {
-        fs.unlinkSync(filename + '.tmp');
-        // reject(new Error(`Failed to load resource: ${url}`));
-        throw error;
-      }
-      // pipe received data
-      response.pipe(file);
-      // and close
-      response.on('end', () => {
-        if (fs.existsSync(filename)) fs.unlinkSync(filename);
-        fs.renameSync(filename + '.tmp', filename);
-        debug(` └getFile: ${filename}`);
-        resolve();
-      });
-    });
-    // resolve();
-  });
-};
+  // Prepare destination
+  const dirname = path.dirname(filename);
+  if (!await fs.pathExists(dirname)) await fs.mkdirp(dirname);
+  const file = fs.createWriteStream(filename + '.tmp');
+  // and download
+  const response = await fetch(url);
+  if (!response.ok) {
+    await fs.unlink(filename + '.tmp');
+    throw new Error(response.statusText);
+  }
+  await response.body?.pipeTo(Writable.toWeb(file));
+  
+  if (await fs.pathExists(filename)) await fs.unlink(filename);
+  await fs.rename(filename + '.tmp', filename);
+  debug(`< getFile: ${filename}`);
+}
 
 const M3UFilePrefix = /^#EXTM3U/;
 const M3UPrefix = /^#EXTINF/;
 const M3UFields = /^#EXTINF:-?\d+,?(?: *?([\w-]*)="(.*?)")?(?: *?([\w-]*)="(.*?)")?(?: *?([\w-]*)="(.*?)")?(?: *?([\w-]*)="(.*?)")?(?: *?([\w-]*)="(.*?)")?.*,(.*)/;
 
-const processM3U = (source, model) => {
-  debug(` ┌M3U-Process: ${source.name}${model.name}`);
+function processM3U(source, model) {
+  debug(`> M3U-Process: ${source.name}${model.name}`);
   return new Promise(resolve => {
     // Preparation
     if (model.filters) {
-      for (let i = 0; i < model.filters.length; i++) model.filters[i].regex = new RegExp(model.filters[i].regex, 'i');
+      for (let i = 0; i < model.filters.length; i++)
+        model.filters[i].regex = new RegExp(model.filters[i].regex, 'i');
     }
     if (model.transformations) {
-      for (let i = 0; i < model.transformations.length; i++) model.transformations[i].regex = new RegExp(model.transformations[i].regex, 'i');
+      for (let i = 0; i < model.transformations.length; i++)
+        model.transformations[i].regex = new RegExp(model.transformations[i].regex, 'i');
     }
     // Loop
     const stream = byline.createStream(fs.createReadStream(`${config.importFolder}/${source.name}.m3u`, { encoding: 'utf8' }));
@@ -78,10 +78,13 @@ const processM3U = (source, model) => {
         // }
         try {
           for (let i = 1; i < 8; i += 2) {
-            if (matches[i]) fields[matches[i]] = matches[i + 1];
+            if (matches[i])
+              fields[matches[i]] = matches[i + 1];
           }
-          if (!fields['tvg-name']) fields['tvg-name'] = matches[11].trim();
-          if (!fields['group-title']) fields['group-title'] = fields['tvg-name'].match(/\w*/); // Compact M3U files = no group-title
+          if (!fields['tvg-name'])
+            fields['tvg-name'] = matches[11].trim();
+          if (!fields['group-title'])
+            fields['group-title'] = fields['tvg-name'].match(/\w*/); // Compact M3U files = no group-title
         } catch (err) {
           console.error(line);
         }
@@ -107,48 +110,53 @@ const processM3U = (source, model) => {
             fields[model.transformations[i].field] = fields[model.transformations[i].field].replace(model.transformations[i].regex, model.transformations[i].substitution);
           }
         }
-        if (valid) streams.push(fields);
+        if (valid)
+          streams.push(fields);
         fields = {};
       }
     });
     stream.on('end', () => {
-      debug(` └M3U-Process: ${source.name}${model.name}`);
+      debug(`< M3U-Process: ${source.name}${model.name}`);
       resolve(streams);
     });
   });
-};
+}
 
-const exportM3U = (source, model, streams) => {
-  debug(` ┌M3U-Write: ${source.name}${model.name}`);
-  return new Promise(resolve => {
-    // Prepare destination
-    if (!fs.existsSync(`${config.exportFolder}`)) fs.mkdirSync(`${config.exportFolder}`, { recursive: true });
-    const file = fs.createWriteStream(`${config.exportFolder}/${source.name}${model.name}.m3u`);
-    // And export
-    file.write('#EXTM3U\n');
-    streams.forEach(stream => {
-      file.write(`#EXTINF:-1`);
-      if (stream['tvg-id']) file.write(` tvg-id="${stream['tvg-id']}"`);
-      if (stream['tvg-name']) file.write(` tvg-name="${stream['tvg-name']}"`);
-      if (stream['tvg-logo']) file.write(` tvg-logo="${stream['tvg-logo']}"`);
-      file.write(` group-title="${stream['group-title']}",${stream['tvg-name']}\n`);
-      file.write(`${stream['stream']}\n`);
-    });
-    file.end();
-    debug(` └M3U-Write: ${source.name}${model.name}`);
-    resolve();
+async function exportM3U(source, model, streams) {
+  debug(`> M3U-Write: ${source.name}${model.name}`);
+  // Prepare destination
+  if (!await fs.pathExists(`${config.exportFolder}`))
+    await fs.mkdirp(`${config.exportFolder}`);
+  const file = fs.createWriteStream(`${config.exportFolder}/${source.name}${model.name}.m3u`);
+  // And export
+  file.write('#EXTM3U\n');
+  streams.forEach(stream => {
+    file.write(`#EXTINF:-1`);
+    if (stream['tvg-id'])
+      file.write(` tvg-id="${stream['tvg-id']}"`);
+    if (stream['tvg-name'])
+      file.write(` tvg-name="${stream['tvg-name']}"`);
+    if (stream['tvg-logo'])
+      file.write(` tvg-logo="${stream['tvg-logo']}"`);
+    file.write(` group-title="${stream['group-title']}",${stream['tvg-name']}\n`);
+    file.write(`${stream['stream']}\n`);
   });
-};
+  file.end();
+  debug(`< M3U-Write: ${source.name}${model.name}`);
+}
 
-const diffHours = (dtStr) => {
+/**
+ * @param {string} dtStr
+ */
+function diffHours(dtStr) {
   const pattern = /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}) ([+\-0-9]{3})(\d{2})/;
   const dt = new Date(dtStr.replace(pattern, '$1-$2-$3 $4:$5:$6 $7:$8'));
 
-  return (dt - new Date())/1000/60/60;
-};
+  return (dt - new Date()) / 1000 / 60 / 60;
+}
 
-const processEPG = (source, streams) => {
-  debug(` ┌EPG-Process: ${source.name}`);
+function processEPG(source, streams) {
+  debug(`> EPG-Process: ${source.name}`);
   return new Promise(resolve => {
     // Always M3U before EPG, so no need to check export folder
     const xmlStream = flow(fs.createReadStream(`${config.importFolder}/${source.name}.xml`));
@@ -163,7 +171,7 @@ const processEPG = (source, streams) => {
     });
     xmlStream.on('tag:programme', (node) => {
       if (streams.indexOf(node.$attrs.channel) >= 0) {
-        if (diffHours(node.$attrs.start) < 48 && diffHours(node.$attrs.stop) > -1) {// Starts in less than 48 hours and Finishes less than 1 hour ago
+        if (diffHours(node.$attrs.start) < 48 && diffHours(node.$attrs.stop) > -1) { // Starts in less than 48 hours and Finishes less than 1 hour ago
           epg.write(flow.toXml(node));
           epg.write('\n');
         }
@@ -171,14 +179,14 @@ const processEPG = (source, streams) => {
     });
     xmlStream.on('end', () => {
       epg.write('</tv>');
-      debug(` └EPG-Process: ${source.name}`);
+      debug(`< EPG-Process: ${source.name}`);
       resolve();
     });
   });
-};
+}
 
-const processSource = async (source) => {
-  debug(`┌Source: ${source.name}`);
+async function processSource(source) {
+  debug(`> Source: ${source.name}`);
 
   let streams;
 
@@ -186,10 +194,10 @@ const processSource = async (source) => {
     await getFile(source.m3u, `${config.importFolder}/${source.name}.m3u`);
     const models = [];
     for (const model of source.models) {
-      models.push(processM3U(source, model)
-        .then(async (result) => {
-          await exportM3U(source, model, result);
-        }));
+      models.push(
+        processM3U(source, model)
+          .then(async result => await exportM3U(source, model, result))
+      );
     }
     await Promise.all(models);
   } catch (err) {
@@ -206,13 +214,11 @@ const processSource = async (source) => {
     }
   }
 
-  debug(`└Source: ${source.name}`);
-};
+  debug(`< Source: ${source.name}`);
+}
 
 (async () => {
-  const sources = [];
   for (const source of config.sources) {
-    sources.push(processSource(source));
+    await processSource(source);
   }
-  Promise.all(sources);
 })();
